@@ -124,6 +124,7 @@ namespace VRFishing.Fishing
             isGrabbed = false;
             controllerTransform = null;
             lastControllerLocalPos = Vector3.zero;
+            totalRotation = 0f;
 
             Debug.Log($"🎣 Reel released - {totalRotation:F0}° total rotation");
         }

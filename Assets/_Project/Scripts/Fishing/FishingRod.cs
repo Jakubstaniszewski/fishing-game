@@ -39,6 +39,9 @@ namespace VRFishing.Fishing
         public bool isHeld = false;
         public FishingState currentState = FishingState.Idle;
 
+        private float grabTime = 0f; // NOWE - kiedy złapano wędkę
+        private const float CAST_COOLDOWN = 0.5f; // Pół sekundy cooldownu
+
         private UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable grabInteractable;
         private Rigidbody rb;
         private LineRenderer lineRenderer;
@@ -162,6 +165,11 @@ namespace VRFishing.Fishing
             if (currentState != FishingState.Idle) return;
             if (rodTip == null) return;
 
+            if (Time.time - grabTime < CAST_COOLDOWN)
+            {
+                return; // Za wcześnie po złapaniu - ignoruj
+            }
+
             // Prosta detekcja - dowolny szybki ruch
             float speed = velocity.magnitude;
 
@@ -211,11 +219,12 @@ namespace VRFishing.Fishing
 
             activeHook = new GameObject("Hook_Active");
             activeHook.transform.position = rodTip.position;
+            activeHook.tag = "Hook"; // DODAJ TAG!
 
             var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             sphere.transform.SetParent(activeHook.transform);
             sphere.transform.localPosition = Vector3.zero;
-            sphere.transform.localScale = Vector3.one * 0.1f; // Większy dla widoczności
+            sphere.transform.localScale = Vector3.one * 0.1f;
 
             var renderer = sphere.GetComponent<Renderer>();
             renderer.material.color = Color.yellow;
@@ -228,6 +237,9 @@ namespace VRFishing.Fishing
             var collider = activeHook.AddComponent<SphereCollider>();
             collider.radius = 0.05f;
             collider.isTrigger = true;
+
+            // DODAJ SKRYPT HACZYKA!
+            activeHook.AddComponent<FishHook>();
 
             currentLineLength = minLineLength;
 
@@ -342,6 +354,7 @@ namespace VRFishing.Fishing
             isHeld = true;
             controllerTransform = args.interactorObject.transform;
             lastPosition = controllerTransform.position;
+            grabTime = Time.time;
 
             Debug.Log($"🎣 Fishing rod grabbed by {controllerTransform.name}");
             SendHapticFeedback(0.3f, 0.1f);
