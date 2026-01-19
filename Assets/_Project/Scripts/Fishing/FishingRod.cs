@@ -1,162 +1,176 @@
-using UnityEngine;
-using UnityEngine.XR.Interaction.Toolkit;
 using System.Collections;
 using System.Collections.Generic;
-using UnityEngine.XR;
+using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.SocialPlatforms.Impl;
+using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
 
 namespace VRFishing.Fishing
 {
-    /// <summary>
-    /// Główny kontroler wędki z detekcją gestów
-    /// </summary>
-    [RequireComponent(typeof(UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable))]
+    [RequireComponent(typeof(XRGrabInteractable))]
     [RequireComponent(typeof(Rigidbody))]
     public class FishingRod : MonoBehaviour
     {
         [Header("Rod Components")]
         [SerializeField] private Transform rodTip;
-        [SerializeField] private Transform hookObject;
 
-        [Header("Hook Physics")]
+        [Header("Hook")]
         private GameObject activeHook;
         private Rigidbody hookRb;
+        private FishHook fishHook;
+        [SerializeField] private List<ParticleSystem> catchParticles;
+        [SerializeField] private AudioClip catchSound;
+        [SerializeField] private AudioSource audioSource;
 
         [Header("Line Settings")]
         [SerializeField] private float maxLineLength = 30f;
-        [SerializeField] private float minLineLength = 2f;
-        [SerializeField] private float reelSpeed = 2f;
-        [SerializeField] private float reelForceMultiplier = 50f; // NOWY - możesz tunować w Inspectorze
-        private float currentLineLength = 2f;
+        [SerializeField] private float minLineLength = 1f;
+        [SerializeField] private float reelSpeed = 3f;
+        [SerializeField] private float reelForce = 50f;
 
         [Header("Cast Settings")]
-        [SerializeField] private float castForceMultiplier = 15f;
-        [SerializeField] private float castDetectionThreshold = 0.8f; // NISKI próg!
+        [SerializeField] private float castForceMultiplier = 20f;
+        [SerializeField] private float castDetectionThreshold = 0.8f;
+        [SerializeField] private float minCastForce = 8f;
+
+        [Header("Input")]
+        [SerializeField] private InputActionReference reelInput;
 
         [Header("Debug")]
         [SerializeField] private bool showDebugGUI = true;
+        public bool reel=false;
 
-        [Header("State")]
         public bool isHeld = false;
         public FishingState currentState = FishingState.Idle;
 
-        private float grabTime = 0f; // NOWE - kiedy złapano wędkę
-        private const float CAST_COOLDOWN = 0.5f; // Pół sekundy cooldownu
-
-        private UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable grabInteractable;
+        private XRGrabInteractable grabInteractable;
         private Rigidbody rb;
         private LineRenderer lineRenderer;
-
-        // Gesture detection
+        public float score = 0.0f;
         private Vector3 lastPosition;
         private Vector3 velocity;
         private Transform controllerTransform;
-        private float castTime = 0f;
+
+        private float grabTime = 0f;
+        private const float CAST_COOLDOWN = 0.5f;
 
         public enum FishingState
         {
             Idle,
             Casting,
             LineCast,
-            Reeling,
             FishHooked
         }
 
         private void Awake()
         {
-            grabInteractable = GetComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable>();
+            grabInteractable = GetComponent<XRGrabInteractable>();
             rb = GetComponent<Rigidbody>();
 
             SetupLineRenderer();
 
             grabInteractable.selectEntered.AddListener(OnGrabbed);
             grabInteractable.selectExited.AddListener(OnReleased);
+        }
 
-            if (rodTip == null)
+        private void OnEnable()
+        {
+            if (reelInput != null && reelInput.action != null)
             {
-                Debug.LogError("❌ RodTip not assigned!");
-            }
-
-            if (hookObject != null)
-            {
-                hookObject.gameObject.SetActive(false);
+                reelInput.action.Enable();
             }
         }
+
+        private void OnDisable()
+        {
+            if (reelInput != null && reelInput.action != null)
+            {
+                reelInput.action.Disable();
+            }
+        }
+
+        public void AddPoints(float points)
+        {
+            score += points;
+            Debug.Log($"Added {points} points. Total score: {score}");
+        }
+
 
         private void SetupLineRenderer()
         {
             GameObject lineObject = new GameObject("FishingLine");
-            lineObject.transform.SetParent(null);
-
             lineRenderer = lineObject.AddComponent<LineRenderer>();
-            lineRenderer.startWidth = 0.03f;
-            lineRenderer.endWidth = 0.025f;
+            lineRenderer.startWidth = 0.02f;
+            lineRenderer.endWidth = 0.015f;
 
             Material lineMat = new Material(Shader.Find("Universal Render Pipeline/Unlit"));
             lineMat.color = Color.white;
             lineRenderer.material = lineMat;
 
-            lineRenderer.sortingOrder = 100;
             lineRenderer.positionCount = 2;
             lineRenderer.enabled = false;
             lineRenderer.useWorldSpace = true;
-            lineRenderer.numCapVertices = 5;
-            lineRenderer.numCornerVertices = 5;
             lineRenderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-            lineRenderer.receiveShadows = false;
         }
 
         private void Update()
         {
             if (isHeld && controllerTransform != null)
             {
-                // Oblicz velocity
                 velocity = (controllerTransform.position - lastPosition) / Time.deltaTime;
                 lastPosition = controllerTransform.position;
 
-                HandleInput();
                 DetectCastGesture();
+                HandleReelInput();
             }
 
-            UpdateLineVisuals();
-            UpdateHookPhysics();
+            // Update state based on fish
+            if (fishHook != null && fishHook.hasFish && currentState == FishingState.LineCast)
+            {
+                currentState = FishingState.FishHooked;
+            }
+            else if (fishHook != null && !fishHook.hasFish && currentState == FishingState.FishHooked)
+            {
+                currentState = FishingState.LineCast;
+            }
+
+            UpdateLine();
+            ClampHookDistance();
         }
 
-        private void HandleInput()
+        private void HandleReelInput()
         {
-            if (currentState == FishingState.LineCast)
+            if (currentState != FishingState.LineCast && currentState != FishingState.FishHooked) return;
+            if (activeHook == null || fishHook == null) return;
+
+            float inputValue = 0f;
+
+            if (reelInput != null && reelInput.action != null)
             {
-                // Klawisz E = nawijanie (fallback)
-                if (Input.GetKey(KeyCode.E))
-                {
-                    ReelIn();
-                    return;
-                }
+                inputValue = reelInput.action.ReadValue<float>();
+            }
 
-                // Próba odczytu Trigger z VR kontrolera
-                var devices = new List<UnityEngine.XR.InputDevice>();
-                UnityEngine.XR.InputDevices.GetDevicesWithCharacteristics(
-                    UnityEngine.XR.InputDeviceCharacteristics.Controller |
-                    UnityEngine.XR.InputDeviceCharacteristics.Right,
-                    devices
-                );
+            if (Input.GetKey(KeyCode.E))
+            {
+                inputValue = 1f;
+            }
 
-                if (devices.Count > 0)
-                {
-                    if (devices[0].TryGetFeatureValue(UnityEngine.XR.CommonUsages.trigger, out float triggerValue))
-                    {
-                        if (triggerValue > 0.5f)
-                        {
-                            ReelIn();
-                            return;
-                        }
-                    }
-                }
+            if (inputValue > 0.1f)
+            {
+                ReelInByAmount(reelSpeed * inputValue * Time.deltaTime);
 
-                // Auto-reel
-                if (Time.time - castTime > 5f)
-                {
-                    ReelIn();
-                }
+                
+            }
+            else if(reel)
+            {
+                ReelInByAmount(reelSpeed * Time.deltaTime);
+            }
+            else
+            {
+                // Not reeling - let hook rest if in water
+                fishHook.StopReeling();
             }
         }
 
@@ -164,189 +178,154 @@ namespace VRFishing.Fishing
         {
             if (currentState != FishingState.Idle) return;
             if (rodTip == null) return;
+            if (Time.time - grabTime < CAST_COOLDOWN) return;
 
-            if (Time.time - grabTime < CAST_COOLDOWN)
-            {
-                return; // Za wcześnie po złapaniu - ignoruj
-            }
-
-            // Prosta detekcja - dowolny szybki ruch
             float speed = velocity.magnitude;
 
-            if (speed > castDetectionThreshold)
+            if (Camera.main == null) return;
+
+            Vector3 playerForward = Camera.main.transform.forward;
+            playerForward.y = 0;
+            playerForward.Normalize();
+
+            float forwardSpeed = Vector3.Dot(velocity, playerForward);
+
+            if (speed > castDetectionThreshold && forwardSpeed > castDetectionThreshold * 0.5f)
             {
-                Debug.Log($"🎣 CAST! Velocity: {speed:F2} m/s");
-                CastLine();
+                Cast();
             }
         }
-
-        private void CastLine()
+       
+        private void Cast()
         {
-            if (currentState != FishingState.Idle) return;
 
-            Debug.Log("========== CAST START ==========");
             currentState = FishingState.Casting;
-            castTime = Time.time;
 
-            CreateHook();
-
-            Vector3 castDirection = rodTip.forward;
-            float castForce = Mathf.Clamp(velocity.magnitude, 3f, 15f) * castForceMultiplier;
-
-            hookRb.AddForce(castDirection * castForce, ForceMode.Impulse);
-
-            lineRenderer.enabled = true;
-            Debug.Log($"Line enabled: {lineRenderer.enabled}");
-
-            SendHapticFeedback(0.5f, 0.2f);
-
-            StartCoroutine(CastRoutine());
-        }
-
-        private IEnumerator CastRoutine()
-        {
-            yield return new WaitForSeconds(0.3f);
-            currentState = FishingState.LineCast;
-            Debug.Log("✅ Line in water - hold TRIGGER or E to reel");
-        }
-
-        private void CreateHook()
-        {
             if (activeHook != null)
             {
                 Destroy(activeHook);
             }
 
-            activeHook = new GameObject("Hook_Active");
+            activeHook = new GameObject("Hook");
             activeHook.transform.position = rodTip.position;
-            activeHook.tag = "Hook"; // DODAJ TAG!
+            activeHook.tag = "Hook";
 
             var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             sphere.transform.SetParent(activeHook.transform);
             sphere.transform.localPosition = Vector3.zero;
-            sphere.transform.localScale = Vector3.one * 0.1f;
-
-            var renderer = sphere.GetComponent<Renderer>();
-            renderer.material.color = Color.yellow;
+            sphere.transform.localScale = Vector3.one * 0.08f;
+            sphere.GetComponent<Renderer>().material.color = Color.yellow;
 
             hookRb = activeHook.AddComponent<Rigidbody>();
-            hookRb.mass = 0.05f;
-            hookRb.linearDamping = 0.5f;
-            hookRb.angularDamping = 0.5f;
+            hookRb.mass = 0.03f;
+            hookRb.linearDamping = 0.3f;
 
-            var collider = activeHook.AddComponent<SphereCollider>();
-            collider.radius = 0.05f;
-            collider.isTrigger = true;
+            var col = activeHook.AddComponent<SphereCollider>();
+            col.radius = 0.04f;
+            col.isTrigger = true;
 
-            // DODAJ SKRYPT HACZYKA!
-            activeHook.AddComponent<FishHook>();
+            fishHook = activeHook.AddComponent<FishHook>();
+            fishHook.SetRod(this);
+            fishHook.catchSound = catchSound; 
+            fishHook.catchParticles = catchParticles;
+            fishHook.audioSource=audioSource;
 
-            currentLineLength = minLineLength;
+            Vector3 castDir = rodTip.forward;
+            float force = Mathf.Max(minCastForce, velocity.magnitude) * castForceMultiplier;
+            hookRb.AddForce(castDir * force, ForceMode.Impulse);
 
-            Debug.Log($"Hook created at: {activeHook.transform.position}");
+            lineRenderer.enabled = true;
+
+            SendHapticFeedback(0.5f, 0.2f);
+
+            StartCoroutine(FinishCast());
         }
 
-        /// <summary>
-        /// Automatyczne nawijanie (fallback dla Trigger/E lub auto-reel)
-        /// </summary>
-        private void ReelIn()
+        private IEnumerator FinishCast()
         {
-            if (activeHook == null) return;
+            yield return new WaitForSeconds(0.3f);
+            currentState = FishingState.LineCast;
+        }
 
-            // Użyj nowej metody z automatyczną prędkością
-            ReelInByAmount(reelSpeed * Time.deltaTime);
+        public void ReelInByAmount(float amount)
+        {
+            if (activeHook == null || fishHook == null) return;
+            if (currentState != FishingState.LineCast && currentState != FishingState.FishHooked) return;
 
-            // Haptic feedback co 10 klatek (tylko dla automatycznego nawijania)
-            if (Time.frameCount % 10 == 0)
+            Vector3 toRod = (rodTip.position - activeHook.transform.position).normalized;
+            float pullForce = amount * reelForce;
+
+            fishHook.ApplyReelForce(toRod, pullForce);
+
+            float dist = Vector3.Distance(rodTip.position, activeHook.transform.position);
+            if (Time.frameCount % 5 == 0)
             {
-                SendHapticFeedback(0.1f, 0.05f);
+                SendHapticFeedback(0.15f, 0.05f);
+            }
+            if (dist < minLineLength)
+            {
+                if (fishHook.hasFish)
+                {
+                    fishHook.OnCaught();
+                }
+
+                ResetRod();
             }
         }
 
-        private void UpdateLineVisuals()
+        private void UpdateLine()
         {
             if (activeHook != null && lineRenderer != null && rodTip != null)
             {
-                if (!lineRenderer.enabled)
-                {
-                    lineRenderer.enabled = true;
-                }
-
                 lineRenderer.SetPosition(0, rodTip.position);
                 lineRenderer.SetPosition(1, activeHook.transform.position);
 
-                float distance = Vector3.Distance(rodTip.position, activeHook.transform.position);
-                float tension = Mathf.Clamp01(distance / maxLineLength);
+                float dist = Vector3.Distance(rodTip.position, activeHook.transform.position);
+                float tension = Mathf.Clamp01(dist / maxLineLength);
 
-                float baseWidth = 0.03f;
-                float tensionWidth = baseWidth * (1f + tension * 0.5f);
+                Color lineColor = Color.Lerp(Color.white, Color.red, tension);
 
-                lineRenderer.startWidth = tensionWidth;
-                lineRenderer.endWidth = tensionWidth * 0.8f;
-
-                Gradient gradient = new Gradient();
-                if (tension < 0.5f)
+                if (fishHook != null && fishHook.hasFish)
                 {
-                    gradient.SetKeys(
-                        new GradientColorKey[] {
-                            new GradientColorKey(Color.white, 0.0f),
-                            new GradientColorKey(Color.Lerp(Color.white, Color.yellow, tension * 2f), 1.0f)
-                        },
-                        new GradientAlphaKey[] {
-                            new GradientAlphaKey(1.0f, 0.0f),
-                            new GradientAlphaKey(1.0f, 1.0f)
-                        }
-                    );
-                }
-                else
-                {
-                    gradient.SetKeys(
-                        new GradientColorKey[] {
-                            new GradientColorKey(Color.yellow, 0.0f),
-                            new GradientColorKey(Color.Lerp(Color.yellow, Color.red, (tension - 0.5f) * 2f), 1.0f)
-                        },
-                        new GradientAlphaKey[] {
-                            new GradientAlphaKey(1.0f, 0.0f),
-                            new GradientAlphaKey(1.0f, 1.0f)
-                        }
-                    );
+                    lineColor = Color.Lerp(Color.yellow, Color.red, tension);
                 }
 
-                lineRenderer.colorGradient = gradient;
-            }
-            else if (lineRenderer != null && lineRenderer.enabled)
-            {
-                lineRenderer.enabled = false;
+                lineRenderer.startColor = lineColor;
+                lineRenderer.endColor = lineColor;
             }
         }
 
-        private void UpdateHookPhysics()
+        private void ClampHookDistance()
         {
-            if (activeHook != null && hookRb != null && rodTip != null)
-            {
-                float distance = Vector3.Distance(rodTip.position, activeHook.transform.position);
+            if (activeHook == null || hookRb == null || rodTip == null) return;
 
-                if (distance > maxLineLength)
+            float dist = Vector3.Distance(rodTip.position, activeHook.transform.position);
+
+            if (dist > maxLineLength)
+            {
+                Vector3 dir = (rodTip.position - activeHook.transform.position).normalized;
+                activeHook.transform.position = rodTip.position - dir * maxLineLength;
+
+                float outwardSpeed = Vector3.Dot(hookRb.linearVelocity, -dir);
+                if (outwardSpeed > 0)
                 {
-                    Vector3 direction = (activeHook.transform.position - rodTip.position).normalized;
-                    activeHook.transform.position = rodTip.position + direction * maxLineLength;
-                    hookRb.linearVelocity = Vector3.zero;
+                    hookRb.linearVelocity -= (-dir) * outwardSpeed;
                 }
             }
         }
 
         private void ResetRod()
         {
-            Debug.Log("🔄 Rod reset");
-
             if (activeHook != null)
             {
                 Destroy(activeHook);
+                activeHook = null;
+                hookRb = null;
+                fishHook = null;
             }
 
             lineRenderer.enabled = false;
             currentState = FishingState.Idle;
-            currentLineLength = minLineLength;
         }
 
         private void OnGrabbed(SelectEnterEventArgs args)
@@ -356,7 +335,6 @@ namespace VRFishing.Fishing
             lastPosition = controllerTransform.position;
             grabTime = Time.time;
 
-            Debug.Log($"🎣 Fishing rod grabbed by {controllerTransform.name}");
             SendHapticFeedback(0.3f, 0.1f);
         }
 
@@ -371,35 +349,33 @@ namespace VRFishing.Fishing
             }
         }
 
-        private void SendHapticFeedback(float amplitude, float duration)
+        public void SendHapticFeedback(float amplitude, float duration)
         {
             if (grabInteractable.isSelected)
             {
                 var interactor = grabInteractable.firstInteractorSelecting;
-                if (interactor is UnityEngine.XR.Interaction.Toolkit.Interactors.XRBaseInputInteractor controllerInteractor)
+                if (interactor is XRBaseInputInteractor inputInteractor)
                 {
-                    controllerInteractor.SendHapticImpulse(amplitude, duration);
+                    inputInteractor.SendHapticImpulse(amplitude, duration);
                 }
             }
         }
-
+        public FishHook GetFishHook()
+        {
+            return fishHook;
+        }
         private void OnDestroy()
         {
-            grabInteractable.selectEntered.RemoveListener(OnGrabbed);
-            grabInteractable.selectExited.RemoveListener(OnReleased);
-
-            if (activeHook != null)
+            if (grabInteractable != null)
             {
-                Destroy(activeHook);
+                grabInteractable.selectEntered.RemoveListener(OnGrabbed);
+                grabInteractable.selectExited.RemoveListener(OnReleased);
             }
 
-            if (lineRenderer != null)
-            {
-                Destroy(lineRenderer.gameObject);
-            }
+            if (activeHook != null) Destroy(activeHook);
+            if (lineRenderer != null) Destroy(lineRenderer.gameObject);
         }
 
-        // DEBUG GUI
         private void OnGUI()
         {
             if (!showDebugGUI) return;
@@ -408,64 +384,58 @@ namespace VRFishing.Fishing
             style.fontSize = 20;
             style.normal.textColor = Color.white;
 
-            GUI.backgroundColor = new Color(0, 0, 0, 0.7f);
+            GUI.Label(new Rect(10, 10, 400, 30), $"Score: {score:F1}", style);
+            GUI.Label(new Rect(10, 40, 400, 30), $"State: {currentState}", style);
+            GUI.Label(new Rect(10, 70, 400, 30), $"Velocity: {velocity.magnitude:F2} m/s", style);
 
-            GUI.Label(new Rect(10, 10, 400, 30), $"State: {currentState}", style);
-            GUI.Label(new Rect(10, 40, 400, 30), $"Velocity: {velocity.magnitude:F2} m/s", style);
-
-            // NOWE: Pokaż długość żyłki
             if (activeHook != null && rodTip != null)
             {
-                float distance = Vector3.Distance(rodTip.position, activeHook.transform.position);
-                GUI.Label(new Rect(10, 70, 500, 30), $"Line out: {distance:F1}m / {maxLineLength:F0}m", style);
+                float dist = Vector3.Distance(rodTip.position, activeHook.transform.position);
+                GUI.Label(new Rect(10, 100, 400, 30), $"Line: {dist:F1}m / {maxLineLength}m", style);
 
-                // Progress bar
-                float percent = distance / maxLineLength;
-                GUI.Box(new Rect(10, 105, 300, 20), "");
-                GUI.Box(new Rect(10, 105, 300 * percent, 20), "");
+                if (fishHook != null)
+                {
+                    GUI.Label(new Rect(10, 130, 400, 30), $"In water: {fishHook.inWater} | Fish: {fishHook.hasFish}", style);
+
+                    if (fishHook.hasFish)
+                    {
+                        GUI.Label(new Rect(10, 160, 400, 30), $"{fishHook.caughtFishName} - {fishHook.caughtFishWeight}kg", style);
+
+                        float escape = fishHook.escapeChance * 100f;
+                        style.normal.textColor = Color.Lerp(Color.green, Color.red, fishHook.escapeChance);
+                        GUI.Label(new Rect(10, 190, 400, 30), $"Escape Risk: {escape:F0}%", style);
+                        style.normal.textColor = Color.white;
+                    }
+                }
             }
         }
 
-        /// <summary>
-        /// Nawija żyłkę o określoną ilość (wywoływane przez ReelHandle)
-        /// </summary>
-        public void ReelInByAmount(float amount)
+
+        public bool HasActiveHook()
         {
-            if (activeHook == null) return;
-            if (currentState != FishingState.LineCast && currentState != FishingState.Reeling) return;
-
-            currentState = FishingState.Reeling;
-
-            currentLineLength -= amount;
-            currentLineLength = Mathf.Max(currentLineLength, minLineLength);
-
-            Vector3 directionToTip = (rodTip.position - activeHook.transform.position).normalized;
-            float distance = Vector3.Distance(rodTip.position, activeHook.transform.position);
-
-            if (distance > currentLineLength)
-            {
-                hookRb.AddForce(directionToTip * amount * reelForceMultiplier, ForceMode.Impulse);
-            }
-
-            // DEBUG - pokaż ile nawinąłeś
-            if (amount > 0.01f)
-            {
-                Debug.Log($"🎣 Reeling: {amount:F3}m | Distance left: {distance:F1}m");
-            }
-
-            if (distance < 1f)
-            {
-                ResetRod();
-                Debug.Log("✅ Fish caught! Haczyk nawinięty!");
-            }
+            return activeHook != null;
         }
+
+        public float GetLineDistance()
+        {
+            if (activeHook != null && rodTip != null)
+            {
+                return Vector3.Distance(rodTip.position, activeHook.transform.position);
+            }
+            return 0f;
+        }
+
+        public float GetMaxLineLength()
+        {
+            return maxLineLength;
+        }
+
         private void OnDrawGizmos()
         {
             if (rodTip != null)
             {
                 Gizmos.color = Color.cyan;
                 Gizmos.DrawWireSphere(rodTip.position, 0.1f);
-
                 Gizmos.color = Color.green;
                 Gizmos.DrawRay(rodTip.position, rodTip.forward * 2f);
             }

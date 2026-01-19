@@ -2,43 +2,41 @@ using UnityEngine;
 
 public class Rowing : MonoBehaviour
 {
-    [Header("Przypisz te pola")]
-    public Rigidbody lodkaRB;      // Rigidbody ��dki (BoatRoot)
-    public Transform koniecWiosla; // Obiekt na ko�cu p�etwy wios�a
+    [Header("Rigidbodies")]
+    public Rigidbody boatRB;
+    public Transform oarTip;
 
-    [Header("Ustawienia")]
-    public float silaNapedu = 400f; // Moc
-    public float poziomWody = 1.0f; // TWOJA WODA JEST NA Y=1
+    [Header("Settings")]
+    public float propulsionForce = 400f;
+    public float waterLevel = 1.0f;
 
-    private Rigidbody wiosloRB;
+    private Rigidbody oarRB;
 
     void Start()
     {
-        wiosloRB = GetComponent<Rigidbody>();
+        oarRB = GetComponent<Rigidbody>();
     }
 
     void FixedUpdate()
     {
-        if (koniecWiosla.position.y < poziomWody)
+        if (oarTip.position.y < waterLevel)
         {
-            Vector3 predkosc = wiosloRB.GetPointVelocity(koniecWiosla.position);
+            Vector3 velocity = oarRB.GetPointVelocity(oarTip.position);
+            Vector3 localVelocity = boatRB.transform.InverseTransformDirection(velocity);
 
-            // --- NOWOŚĆ: Blokada Wsteczna ---
-            // Zamieniamy prędkość świata na prędkość lokalną względem łódki
-            Vector3 lokalnaPredkosc = lodkaRB.transform.InverseTransformDirection(predkosc);
+            if (localVelocity.z > 0f)
+                return;
 
-            // Jeśli wiosło porusza się w stronę dziobu (Z > 0), to znaczy że robimy zamach.
-            // Wtedy NIE chcemy pchać łódki do tyłu. Przerywamy funkcję.
-            if (lokalnaPredkosc.z > 0) return;
-            // --------------------------------
+            Vector3 force = -velocity * propulsionForce;
+            force.y = 0f;
 
-            // Reszta bez zmian...
-            Vector3 sila = -predkosc * silaNapedu;
-            sila.y = 0;
-
-            if (sila.magnitude > 0.1f)
+            if (force.magnitude > 0.1f)
             {
-                lodkaRB.AddForceAtPosition(sila * Time.fixedDeltaTime, transform.position, ForceMode.Impulse);
+                boatRB.AddForceAtPosition(
+                    force * Time.fixedDeltaTime,
+                    transform.position,
+                    ForceMode.Impulse
+                );
             }
         }
     }

@@ -1,188 +1,185 @@
 ﻿using UnityEngine;
-using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.InputSystem;
 
 namespace VRFishing.Fishing
 {
-    /// <summary>
-    /// Korbka do nawijania - obraca się wokół osi wędki (UP)
-    /// </summary>
-    [RequireComponent(typeof(UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable))]
     public class ReelHandle : MonoBehaviour
     {
         [Header("References")]
         [SerializeField] private FishingRod fishingRod;
-        [SerializeField] private Transform rotationPivot;
+        [SerializeField] private Transform reelVisual;
+        [SerializeField] private Transform pivotPoint;
+        [SerializeField] private Transform controllerTransform;
+
+        [Header("Input")]
+        [SerializeField] private InputActionReference gripAction;
 
         [Header("Reel Settings")]
-        [SerializeField] private float reelPerRotation = 0.5f;
-        [SerializeField] private float hapticIntensity = 0.2f;
-        [SerializeField] private float minAngleDelta = 0.5f; // Minimalna detekcja
+        [SerializeField] private float reelPerRotation = 50f;
 
         [Header("Debug")]
         [SerializeField] private bool showDebug = true;
 
-        private UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable grabInteractable;
-        private Transform controllerTransform;
-        private bool isGrabbed = false;
-
-        // Tracking rotation
-        private Vector3 lastControllerLocalPos;
+        private bool isGrabbing = false;
+        private bool controllerInRange = false;
+        private Vector3 lastControllerPos;
         private float totalRotation = 0f;
 
-        private void Awake()
+        private void OnEnable()
         {
-            grabInteractable = GetComponent<UnityEngine.XR.Interaction.Toolkit.Interactables.XRGrabInteractable>();
-
-            // POPRAWKA: Ustaw Rigidbody jako kinematic (nie usuwaj!)
-            Rigidbody rb = GetComponent<Rigidbody>();
-            if (rb != null)
+            if (gripAction != null && gripAction.action != null)
             {
-                rb.isKinematic = true;
-                rb.useGravity = false;
-                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-                Debug.Log("✅ ReelHandle Rigidbody configured as kinematic");
+                gripAction.action.Enable();
             }
-            else
-            {
-                // Dodaj Rigidbody jeśli brakuje
-                rb = gameObject.AddComponent<Rigidbody>();
-                rb.isKinematic = true;
-                rb.useGravity = false;
-                rb.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-                Debug.Log("✅ Added kinematic Rigidbody to ReelHandle");
-            }
+        }
 
-            grabInteractable.selectEntered.AddListener(OnGrabbed);
-            grabInteractable.selectExited.AddListener(OnReleased);
-
-            if (rotationPivot == null)
+        private void OnDisable()
+        {
+            if (gripAction != null && gripAction.action != null)
             {
-                rotationPivot = transform;
+                gripAction.action.Disable();
             }
         }
 
         private void Update()
         {
-            if (isGrabbed && controllerTransform != null)
+            if (gripAction == null || controllerTransform == null || pivotPoint == null) return;
+
+            float gripValue = gripAction.action.ReadValue<float>();
+            // Start grabbing
+            if (!isGrabbing && gripValue > 0.8f && controllerInRange)
             {
-                DetectRotation();
+                isGrabbing = true;
+                lastControllerPos = controllerTransform.position;
+                totalRotation = 0f;
+                Debug.Log("Reel grabbed");
+            }
+
+            // Stop grabbing
+            if (isGrabbing && gripValue < 0.2f)
+            {
+                isGrabbing = false;
+                Debug.Log($"Reel released - {totalRotation:F0} degrees total");
+            }
+
+            // Handle rotation
+            if (isGrabbing)
+            {
+                CalculateRotation();
+            }
+            else
+            {
+                fishingRod.reel = false;
             }
         }
 
-        private void DetectRotation()
+        private void CalculateRotation()
         {
-            Vector3 controllerLocalPos = rotationPivot.InverseTransformPoint(controllerTransform.position);
+            Vector3 pivotPos = pivotPoint.position;
+            Vector3 pivotUp = pivotPoint.up;
+            
+            // Project controller positions onto the plane
+            Vector3 lastFlat = lastControllerPos - pivotPos;
+            lastFlat = lastFlat - Vector3.Dot(lastFlat, pivotUp) * pivotUp;
 
-            if (lastControllerLocalPos != Vector3.zero)
+            Vector3 currentFlat = controllerTransform.position - pivotPos;
+            currentFlat = currentFlat - Vector3.Dot(currentFlat, pivotUp) * pivotUp;
+
+            // Skip if too close to center
+            if (lastFlat.magnitude < 0.01f || currentFlat.magnitude < 0.01f)
             {
-                float lastAngle = Mathf.Atan2(lastControllerLocalPos.x, lastControllerLocalPos.z) * Mathf.Rad2Deg;
-                float currentAngleCalc = Mathf.Atan2(controllerLocalPos.x, controllerLocalPos.z) * Mathf.Rad2Deg;
+                lastControllerPos = controllerTransform.position;
+                return;
+            }
 
-                float deltaAngle = Mathf.DeltaAngle(lastAngle, currentAngleCalc);
+            // Calculate signed angle
+            float angle = Vector3.SignedAngle(lastFlat, currentFlat, pivotUp);
 
-                // ZWIĘKSZONE FILTRY - większa czułość na błędy
-                if (Mathf.Abs(deltaAngle) < 90f && Mathf.Abs(deltaAngle) > minAngleDelta)
+            // Filter noise
+            if (Mathf.Abs(angle) > 0.5f && Mathf.Abs(angle) < 45f)
+            {
+                totalRotation += angle;
+
+                // Rotate the visual
+                if (reelVisual != null)
                 {
-                    totalRotation += deltaAngle;
+                    reelVisual.Rotate(pivotUp, angle, Space.World);
+                }
 
-                    rotationPivot.Rotate(Vector3.up, deltaAngle, Space.Self);
-
-                    if (fishingRod != null)
+                // Reel in
+                if (fishingRod != null)
+                {
+                    float reelAmount = (Mathf.Abs(angle) / 360f) * reelPerRotation;
+                    
+                    if ( reelAmount > 0.001f && isGrabbing && controllerInRange)
                     {
-                        // DOKŁADNIEJSZE OBLICZENIE - mniejsze wartości
-                        float rotationFraction = Mathf.Abs(deltaAngle) / 360f;
-                        float reelAmount = rotationFraction * reelPerRotation;
+                        fishingRod.reel = true;
+                    }
+                    else
+                    {
+                        fishingRod.reel = false;
+                    }
 
-                        // DEBUG - pokaż dokładnie co się dzieje
-                        if (showDebug && reelAmount > 0.001f)
-                        {
-                            Debug.Log($"🔄 Angle: {deltaAngle:F2}° | Fraction: {rotationFraction:F4} | Reel: {reelAmount:F4}m | Total: {totalRotation:F1}°");
-                        }
 
-                        fishingRod.ReelInByAmount(reelAmount);
-
-                        SendHaptic(hapticIntensity, 0.02f);
+                    if (showDebug && reelAmount > 0.001f)
+                    {
+                        Debug.Log($"Reel: {reelAmount:F4}m | Angle: {angle:F1} | Total: {totalRotation:F1}");
                     }
                 }
             }
 
-            lastControllerLocalPos = controllerLocalPos;
+            lastControllerPos = controllerTransform.position;
         }
 
-        private void OnGrabbed(SelectEnterEventArgs args)
+        private void OnTriggerEnter(Collider other)
         {
-            isGrabbed = true;
-            controllerTransform = args.interactorObject.transform;
-            lastControllerLocalPos = Vector3.zero;
-            totalRotation = 0f;
-
-            Debug.Log($"🎣 Reel handle grabbed!");
-        }
-
-        private void OnReleased(SelectExitEventArgs args)
-        {
-            isGrabbed = false;
-            controllerTransform = null;
-            lastControllerLocalPos = Vector3.zero;
-            totalRotation = 0f;
-
-            Debug.Log($"🎣 Reel released - {totalRotation:F0}° total rotation");
-        }
-
-        private void SendHaptic(float amplitude, float duration)
-        {
-            if (grabInteractable.isSelected)
+            // Check if it's the controller
+            if (other.transform == controllerTransform || other.transform.IsChildOf(controllerTransform))
             {
-                var interactor = grabInteractable.firstInteractorSelecting;
-                if (interactor is UnityEngine.XR.Interaction.Toolkit.Interactors.XRBaseInputInteractor controllerInteractor)
-                {
-                    controllerInteractor.SendHapticImpulse(amplitude, duration);
-                }
+                controllerInRange = true;
+                Debug.Log("Controller in reel range");
             }
         }
 
-        private void OnDestroy()
+        private void OnTriggerExit(Collider other)
         {
-            grabInteractable.selectEntered.RemoveListener(OnGrabbed);
-            grabInteractable.selectExited.RemoveListener(OnReleased);
+            if (other.transform == controllerTransform || other.transform.IsChildOf(controllerTransform))
+            {
+                controllerInRange = false;
+                Debug.Log("Controller left reel range");
+            }
         }
 
         private void OnDrawGizmos()
         {
-            if (rotationPivot != null)
+            if (pivotPoint == null) return;
+
+            // Draw pivot axis
+            Gizmos.color = Color.green;
+            Gizmos.DrawRay(pivotPoint.position, pivotPoint.up * 0.15f);
+
+            // Draw rotation circle
+            Gizmos.color = Color.yellow;
+            int segments = 32;
+            float radius = 0.08f;
+
+            Vector3 right = pivotPoint.right * radius;
+            Vector3 forward = pivotPoint.forward * radius;
+
+            Vector3 prevPoint = pivotPoint.position + right;
+            for (int i = 1; i <= segments; i++)
             {
-                // Pokaż oś obrotu (UP - wzdłuż wędki)
-                Gizmos.color = Color.green;
-                Gizmos.DrawRay(rotationPivot.position, rotationPivot.up * 0.3f);
-
-                // Pokaż płaszczyznę obrotu (poziomo)
-                Gizmos.color = Color.yellow;
-                DrawCircleGizmo(rotationPivot.position, rotationPivot.up, 0.12f);
-
-                if (isGrabbed && controllerTransform != null)
-                {
-                    // Linia do kontrolera
-                    Gizmos.color = Color.red;
-                    Gizmos.DrawLine(rotationPivot.position, controllerTransform.position);
-                    Gizmos.DrawWireSphere(controllerTransform.position, 0.02f);
-                }
+                float angle = (i / (float)segments) * Mathf.PI * 2f;
+                Vector3 nextPoint = pivotPoint.position + right * Mathf.Cos(angle) + forward * Mathf.Sin(angle);
+                Gizmos.DrawLine(prevPoint, nextPoint);
+                prevPoint = nextPoint;
             }
-        }
 
-        // Helper - rysuj okrąg
-        private void DrawCircleGizmo(Vector3 center, Vector3 normal, float radius)
-        {
-            Vector3 forward = Vector3.Slerp(normal, -normal, 0.5f);
-            Vector3 right = Vector3.Cross(normal, forward).normalized * radius;
-            forward = Vector3.Cross(right, normal).normalized * radius;
-
-            Vector3 lastPoint = center + right;
-            for (int i = 1; i <= 32; i++)
+            // Draw controller connection when grabbing
+            if (Application.isPlaying && isGrabbing && controllerTransform != null)
             {
-                float angle = i / 32f * Mathf.PI * 2f;
-                Vector3 nextPoint = center + right * Mathf.Cos(angle) + forward * Mathf.Sin(angle);
-                Gizmos.DrawLine(lastPoint, nextPoint);
-                lastPoint = nextPoint;
+                Gizmos.color = Color.red;
+                Gizmos.DrawLine(pivotPoint.position, controllerTransform.position);
             }
         }
     }
